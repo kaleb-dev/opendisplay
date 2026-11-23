@@ -73,6 +73,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
     private var encoder: VTCompressionSession?
     private var connection: NWConnection?
+    let media = MediaSender()
     private var virtualDisplay: VirtualDisplay?
     private let queue = DispatchQueue(label: "sender.video")
     private let startCode: [UInt8] = [0, 0, 0, 1]
@@ -1397,6 +1398,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stop() {
         stopped = true
+        media.disconnect()
         invalidateCapturePipeline(discardingLastFrame: true)
         stopCursorPositionEcho()
         cursorImageTimer?.cancel()
@@ -1711,6 +1713,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             self.cursorSeq = 0
             self.lastCursorSent = (-1, -1, false)
             self.cursorSessionGeneration = readyGeneration
+        }
+        // Fork: sound/mic/camera ride their own link to the same host.
+        if case .tcp = transport,
+           case .hostPort(let host, let port)? = conn.currentPath?.remoteEndpoint {
+            media.connect(host: host, displayPort: port.rawValue)
         }
         everConnected = true
         awaitingWake = false

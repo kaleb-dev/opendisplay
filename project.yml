@@ -123,6 +123,8 @@ targets:
         NSLocalNetworkUsageDescription: OpenDisplay Receiver advertises itself on the local network so another Mac can connect and use this Mac as a display.
         NSBonjourServices: ["_opensidecar._tcp"]
         NSAppleEventsUsageDescription: OpenDisplay Receiver shuts this Mac down when the connected Mac asks it to.
+        NSMicrophoneUsageDescription: OpenDisplay Receiver sends this Mac's microphone to the connected Mac for calls.
+        NSCameraUsageDescription: OpenDisplay Receiver sends this Mac's camera to the connected Mac for calls.
         LSApplicationCategoryType: public.app-category.utilities
         # Own Sparkle feed (separate DMG, same signing key); published by
         # release.yml next to the sender's appcast.

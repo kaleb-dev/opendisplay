@@ -38,6 +38,7 @@ final class ReceiverController: ObservableObject {
     private var screenSleepObservers: [NSObjectProtocol] = []
     private let fullscreenPreference = FullscreenPreference()
     private var windowObservers: [NSObjectProtocol] = []
+    let media = MediaReceiver()
     private var windowCloseTimer: DispatchWorkItem?
 
     private var fallbackName: String { Host.current().localizedName ?? "Mac" }
@@ -73,6 +74,7 @@ final class ReceiverController: ObservableObject {
         receiver.onPowerAction = { [weak self] action in self?.perform(action) }
         self.receiver = receiver
         receiver.start(port: 9000)
+        media.start(displayPort: 9000)
 
         receiver.$connected
             .removeDuplicates()
@@ -140,6 +142,7 @@ final class ReceiverController: ObservableObject {
         let workspace = NSWorkspace.shared.notificationCenter
         screenSleepObservers.forEach { workspace.removeObserver($0) }
         screenSleepObservers = []
+        media.stop()
         receiver.stop(completion: completion)
         self.receiver = nil
         connected = false

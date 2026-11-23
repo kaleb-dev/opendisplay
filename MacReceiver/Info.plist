@@ -28,8 +28,12 @@
 	<array>
 		<string>_opensidecar._tcp</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>OpenDisplay Receiver sends this Mac's camera to the connected Mac for calls.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>OpenDisplay Receiver advertises itself on the local network so another Mac can connect and use this Mac as a display.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>OpenDisplay Receiver sends this Mac's microphone to the connected Mac for calls.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>SUEnableAutomaticChecks</key>
