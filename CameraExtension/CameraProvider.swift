@@ -63,6 +63,7 @@ final class CameraDeviceSource: NSObject, CMIOExtensionDeviceSource {
     func started(_ stream: CameraStreamSource, client: CMIOExtensionClient?) {
         if stream === source {
             sourceClients += 1
+            announceInUse()
         } else {
             sinkClient = client
             consumeNext()
@@ -72,9 +73,17 @@ final class CameraDeviceSource: NSObject, CMIOExtensionDeviceSource {
     func stopped(_ stream: CameraStreamSource) {
         if stream === source {
             sourceClients = max(0, sourceClients - 1)
+            announceInUse()
         } else {
             sinkClient = nil
         }
+    }
+
+    /// Clients cache device properties; push the new value or the sender
+    /// keeps reading the old one.
+    private func announceInUse() {
+        let state = CMIOExtensionPropertyState<AnyObject>(value: (sourceClients > 0 ? "1" : "0") as NSString)
+        device.notifyPropertiesChanged([inUseProperty: state])
     }
 
     /// Pull one frame from the app, pass it to the source stream, repeat.

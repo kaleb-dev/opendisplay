@@ -5,5 +5,8 @@
 	<!-- Fork: reading the "(OpenDisplay)" speaker mirror is audio input. -->
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
+	<!-- Fork: installs the MacBook camera (CameraExtension). Needs a team-signed build. -->
+	<key>com.apple.developer.system-extension.install</key>
+	<true/>
 </dict>
 </plist>
