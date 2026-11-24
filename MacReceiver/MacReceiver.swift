@@ -342,13 +342,27 @@ final class ReceiverController: ObservableObject {
             }
         }
         windowObservers = [
-            observe(NSWindow.didEnterFullScreenNotification) { $0.fullscreenPreference.wantsFullscreen = true },
-            observe(NSWindow.didExitFullScreenNotification) { $0.fullscreenPreference.wantsFullscreen = false },
+            observe(NSWindow.didEnterFullScreenNotification) {
+                $0.fullscreenPreference.wantsFullscreen = true
+                $0.coverNotifications(true)
+            },
+            observe(NSWindow.didExitFullScreenNotification) {
+                $0.fullscreenPreference.wantsFullscreen = false
+                $0.coverNotifications(false)
+            },
             observe(NSWindow.willCloseNotification) {
                 $0.stopObservingWindow()
                 $0.window = nil
             },
         ]
+    }
+
+    /// Fork: this Mac's own notification banners would cover the other
+    /// Mac's screen. In fullscreen the window sits at screen-saver level, which
+    /// banners stay under (they still land in Notification Center). Measured
+    /// on macOS 27.2.
+    private func coverNotifications(_ cover: Bool) {
+        window?.level = cover ? .screenSaver : .normal
     }
 
     private func stopObservingWindow() {

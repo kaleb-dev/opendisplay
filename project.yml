@@ -74,7 +74,8 @@ targets:
         # verifies update signatures against this public key before installing.
         SUPublicEDKey: rYxlIePmwzi2bRo/qIsuY2TqTnQ34li2gQhJpGBiumw=
         # Check for updates automatically in the background on a schedule.
-        SUEnableAutomaticChecks: true
+        # Fork: never auto-check. The feed is upstream's; its update would replace this fork.
+        SUEnableAutomaticChecks: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.kalebdev.opendisplay.mac
@@ -157,7 +158,8 @@ targets:
         # release.yml next to the sender's appcast.
         SUFeedURL: https://opendisplay.app/appcast-receiver.xml
         SUPublicEDKey: rYxlIePmwzi2bRo/qIsuY2TqTnQ34li2gQhJpGBiumw=
-        SUEnableAutomaticChecks: true
+        # Fork: never auto-check. The feed is upstream's; its update would replace this fork.
+        SUEnableAutomaticChecks: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.kalebdev.opendisplay.mac.receiver
