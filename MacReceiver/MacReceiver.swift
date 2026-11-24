@@ -39,6 +39,7 @@ final class ReceiverController: ObservableObject {
     private let fullscreenPreference = FullscreenPreference()
     private var windowObservers: [NSObjectProtocol] = []
     let media = MediaReceiver()
+    private lazy var camera = CameraCapture { [media] in media.sendCamera($0) }
     private var windowCloseTimer: DispatchWorkItem?
 
     private var fallbackName: String { Host.current().localizedName ?? "Mac" }
@@ -74,6 +75,7 @@ final class ReceiverController: ObservableObject {
         receiver.onPowerAction = { [weak self] action in self?.perform(action) }
         self.receiver = receiver
         receiver.start(port: 9000)
+        media.onCameraRequest = { [camera] in camera.setRunning($0) }
         media.start(displayPort: 9000)
 
         receiver.$connected

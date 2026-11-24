@@ -20,8 +20,28 @@ final class MediaSender: NSObject, SCStreamOutput {
     private var micIdlePolls = 3
     private var generation = 0
 
-    /// Hook for the camera: receives ODCM frames.
-    var onCameraFrame: ((Data) -> Void)?
+    private var cameraFrames = 0
+    private lazy var cameraDecoder = CameraDecoder { [weak self] image in
+        guard let self else { return }
+        self.cameraFrames += 1
+        // ponytail: proof of life until the virtual camera consumes these.
+        if self.cameraFrames % 150 == 1 {
+            Log.info("camera: decoded frame \(self.cameraFrames) "
+                + "\(CVPixelBufferGetWidth(image))x\(CVPixelBufferGetHeight(image))")
+        }
+        VirtualCamera.shared.push(image)
+    }
+    private var cameraObserver: NSObjectProtocol?
+
+    override init() {
+        super.init()
+        cameraObserver = NotificationCenter.default.addObserver(
+            forName: VirtualCamera.inUseChanged, object: nil, queue: nil) { [weak self] note in
+            guard let inUse = note.object as? Bool else { return }
+            self?.queue.async { self?.send(.control, Data("{\"camera\":\(inUse)}".utf8)) }
+        }
+        VirtualCamera.shared.start()
+    }
 
     func connect(host: NWEndpoint.Host, displayPort: UInt16) {
         queue.async { [self] in
@@ -50,7 +70,7 @@ final class MediaSender: NSObject, SCStreamOutput {
                 guard let self, self.generation == gen else { return }
                 switch tag {
                 case .mic: self.playMic(data)
-                case .camera: self.onCameraFrame?(data)
+                case .camera: self.cameraDecoder.decode(data)
                 default: break
                 }
             }, onEnd: { [weak self] in
@@ -85,6 +105,12 @@ final class MediaSender: NSObject, SCStreamOutput {
     private func startOnQueue(_ gen: Int) {
         guard generation == gen else { return }
         startMicBridge()
+        // The MacBook camera runs while an app watches the virtual camera.
+        // `defaults write <sender bundle id> cameraDebug -bool YES` forces it on
+        // for testing without the extension.
+        if VirtualCamera.shared.isInUse || UserDefaults.standard.bool(forKey: "cameraDebug") {
+            send(.control, Data("{\"camera\":true}".utf8))
+        }
         Task { await self.startSoundCapture(gen) }
     }
 
