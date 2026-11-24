@@ -1717,7 +1717,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // Fork: sound/mic/camera ride their own link to the same host.
         if case .tcp = transport,
            case .hostPort(let host, let port)? = conn.currentPath?.remoteEndpoint {
-            media.connect(host: host, displayPort: port.rawValue)
+            media.connect(host: host, displayPort: port.rawValue, receiverName: endpointName)
         }
         everConnected = true
         awaitingWake = false

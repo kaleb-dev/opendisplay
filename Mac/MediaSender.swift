@@ -2,17 +2,18 @@ import AVFoundation
 import CoreAudio
 import Foundation
 import Network
-import ScreenCaptureKit
 
-/// Sender half of the fork's media link (see Shared/MediaLink.swift):
-/// streams this Mac's system sound to the receiver, plays the receiver's
-/// microphone into BlackHole 2ch so FaceTime and friends can pick it as a mic,
-/// and asks for the mic only while another app is actually recording from
-/// BlackHole.
-final class MediaSender: NSObject, SCStreamOutput {
+/// Sender half of the fork's media link (see Shared/MediaLink.swift). Each
+/// receiver has its own audio devices on this Mac, "<name> (OpenDisplay)",
+/// from the drivers tools/build-audio-drivers.sh builds:
+/// - sound played to its output device is forwarded to the receiver,
+/// - the receiver's microphone arrives on its input device, and the
+///   receiver is asked for its mic only while some app records from it.
+final class MediaSender: NSObject {
     private let queue = DispatchQueue(label: "opendisplay.media.sender")
     private var conn: NWConnection?
-    private var stream: SCStream?
+    private var soundIn: AudioQueueRef?
+    private var driver: String?
     private var micOut: AudioQueueRef?
     private var micFifo: [Float] = []
     private var micPoll: DispatchSourceTimer?
@@ -43,10 +44,12 @@ final class MediaSender: NSObject, SCStreamOutput {
         VirtualCamera.shared.start()
     }
 
-    func connect(host: NWEndpoint.Host, displayPort: UInt16) {
+    /// `receiverName` picks the receiver's audio devices (e.g. "Kaleb's MacBook Air").
+    func connect(host: NWEndpoint.Host, displayPort: UInt16, receiverName: String) {
         queue.async { [self] in
             disconnectOnQueue()
             generation += 1
+            driver = AudioDevices.driver(for: receiverName)
             let gen = generation
             let port = NWEndpoint.Port(rawValue: displayPort &+ MediaLink.portOffset)!
             let params = NWParameters.tcp
@@ -87,8 +90,8 @@ final class MediaSender: NSObject, SCStreamOutput {
     private func disconnectOnQueue() {
         conn?.cancel()
         conn = nil
-        stream?.stopCapture { _ in }
-        stream = nil
+        if let soundIn { AudioQueueDispose(soundIn, true) }
+        soundIn = nil
         micPoll?.cancel()
         micPoll = nil
         if let micOut { AudioQueueDispose(micOut, true) }
@@ -104,81 +107,87 @@ final class MediaSender: NSObject, SCStreamOutput {
 
     private func startOnQueue(_ gen: Int) {
         guard generation == gen else { return }
-        startMicBridge()
+        if let driver {
+            // Reading the speaker mirror is audio input to macOS: without the
+            // microphone grant it silently delivers zeros.
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                guard let self else { return }
+                if !granted { Log.info("media: microphone access denied; sound forwarding is silent") }
+                self.queue.async { if self.generation == gen { self.startSoundForwarding(driver) } }
+            }
+            startMicBridge(driver)
+        } else {
+            Log.info("media: no OpenDisplay audio devices for this receiver; sound and mic off")
+        }
         // The MacBook camera runs while an app watches the virtual camera.
         // `defaults write <sender bundle id> cameraDebug -bool YES` forces it on
         // for testing without the extension.
         if VirtualCamera.shared.isInUse || UserDefaults.standard.bool(forKey: "cameraDebug") {
             send(.control, Data("{\"camera\":true}".utf8))
         }
-        Task { await self.startSoundCapture(gen) }
     }
 
-    // MARK: Sound: system audio -> receiver
+    // MARK: Sound: "<name> (OpenDisplay)" output -> receiver
 
-    private func startSoundCapture(_ gen: Int) async {
-        do {
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-            guard let display = content.displays.first else { return }
-            let config = SCStreamConfiguration()
-            config.capturesAudio = true
-            config.excludesCurrentProcessAudio = true   // never loop the mic back out
-            config.sampleRate = Int(MediaLink.sampleRate)
-            config.channelCount = 2
-            // Audio only: the smallest, slowest video SCK allows.
-            config.width = 2
-            config.height = 2
-            config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-            let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []),
-                                  configuration: config, delegate: nil)
-            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
-            try await stream.startCapture()
-            queue.async { [self] in
-                if generation == gen { self.stream = stream } else { stream.stopCapture { _ in } }
+    /// Reads the output device's hidden mirror. Planar Float32 stereo goes
+    /// out as ODAU; while nothing plays, the driver delivers silence.
+    private func startSoundForwarding(_ driver: String) {
+        var format = AudioStreamBasicDescription(
+            mSampleRate: MediaLink.sampleRate, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 8, mFramesPerPacket: 1, mBytesPerFrame: 8,
+            mChannelsPerFrame: 2, mBitsPerChannel: 32, mReserved: 0)
+        var input: AudioQueueRef?
+        var status = AudioQueueNewInputWithDispatchQueue(&input, &format, 0, queue) { [weak self] aq, buffer, _, _, _ in
+            let frames = Int(buffer.pointee.mAudioDataByteSize) / 8
+            if frames > 0 {
+                let interleaved = UnsafeBufferPointer(start: buffer.pointee.mAudioData.assumingMemoryBound(to: Float.self),
+                                                      count: frames * 2)
+                var planar = [Float](repeating: 0, count: frames * 2)
+                for frame in 0..<frames {
+                    planar[frame] = interleaved[frame * 2]
+                    planar[frames + frame] = interleaved[frame * 2 + 1]
+                }
+                self?.send(.sound, planar.withUnsafeBytes { Data($0) })
             }
-            Log.info("media: system sound capture started")
-        } catch {
-            Log.info("media: system sound capture failed: \(error)")
+            AudioQueueEnqueueBuffer(aq, buffer, 0, nil)
         }
-    }
-
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-                of type: SCStreamOutputType) {
-        guard type == .audio, stream === self.stream, CMSampleBufferIsValid(sampleBuffer) else { return }
-        // SCK delivers Float32 planar; send the planes back to back (2 channels).
-        var payload = Data()
-        try? sampleBuffer.withAudioBufferList { list, _ in
-            let planes = Array(list)
-            guard let first = planes.first, let firstData = first.mData else { return }
-            let left = Data(bytes: firstData, count: Int(first.mDataByteSize))
-            payload.append(left)
-            if planes.count > 1, let right = planes[1].mData {
-                payload.append(Data(bytes: right, count: Int(planes[1].mDataByteSize)))
-            } else {
-                payload.append(left)   // mono source: duplicate
-            }
+        guard status == noErr, let input else { Log.info("media: sound input failed (\(status))"); return }
+        var uid = "\(driver)Out_2_UID" as CFString
+        status = AudioQueueSetProperty(input, kAudioQueueProperty_CurrentDevice, &uid,
+                                       UInt32(MemoryLayout<CFString>.size))
+        for _ in 0..<3 {   // 3 x 20 ms in flight
+            var buffer: AudioQueueBufferRef?
+            AudioQueueAllocateBuffer(input, 960 * 8, &buffer)
+            if let buffer { AudioQueueEnqueueBuffer(input, buffer, 0, nil) }
         }
-        if !payload.isEmpty { send(.sound, payload) }
-    }
-
-    // MARK: Mic: receiver mic -> BlackHole 2ch
-
-    private func startMicBridge() {
-        guard let blackHole = AudioDevices.device(uid: "BlackHole2ch_UID") else {
-            Log.info("media: BlackHole 2ch not installed; MacBook mic unavailable")
+        guard status == noErr, AudioQueueStart(input, nil) == noErr else {
+            Log.info("media: cannot read \(driver)Out (\(status))")
+            AudioQueueDispose(input, true)
             return
         }
-        guard startMicOutput() else { return }
+        soundIn = input
+        Log.info("media: forwarding \(driver)Out to the receiver")
+    }
 
-        // Ask for the MacBook mic only while some other app records from
-        // BlackHole, so its orange mic light is not on all the time.
+    // MARK: Mic: receiver mic -> "<name> (OpenDisplay)" input
+
+    private func startMicBridge(_ driver: String) {
+        guard let visibleMic = AudioDevices.device(uid: "\(driver)In_UID"),
+              startMicOutput(uid: "\(driver)In_2_UID") else {
+            Log.info("media: \(driver)In not installed; receiver mic unavailable")
+            return
+        }
+
+        // Ask for the receiver's mic only while some app records from its
+        // input device, so the receiver's mic light is not on all the time.
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: 1)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             // Release only after 3 quiet polls: device reconfiguration
             // briefly hides the recording app.
-            if AudioDevices.otherProcessRecording(from: blackHole) { self.micIdlePolls = 0 } else { self.micIdlePolls += 1 }
+            if AudioDevices.otherProcessRecording(from: visibleMic) { self.micIdlePolls = 0 } else { self.micIdlePolls += 1 }
             let wanted = self.micIdlePolls < 3
             if wanted != self.micWanted {
                 self.micWanted = wanted
@@ -190,9 +199,9 @@ final class MediaSender: NSObject, SCStreamOutput {
         micPoll = timer
     }
 
-    /// An AudioQueue on BlackHole. Unlike AVAudioEngine it survives
-    /// BlackHole being reconfigured when a recording app opens it.
-    private func startMicOutput() -> Bool {
+    /// An AudioQueue on the input device's hidden mirror. Unlike AVAudioEngine
+    /// it survives the device being reconfigured when a recording app opens it.
+    private func startMicOutput(uid deviceUID: String) -> Bool {
         var format = AudioStreamBasicDescription(
             mSampleRate: MediaLink.sampleRate, mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
@@ -213,11 +222,11 @@ final class MediaSender: NSObject, SCStreamOutput {
             AudioQueueEnqueueBuffer(aq, buffer, 0, nil)
         }
         guard status == noErr, let out else { Log.info("media: mic output failed (\(status))"); return false }
-        var uid = "BlackHole2ch_UID" as CFString
+        var uid = deviceUID as CFString
         status = AudioQueueSetProperty(out, kAudioQueueProperty_CurrentDevice, &uid,
                                        UInt32(MemoryLayout<CFString>.size))
         guard status == noErr else {
-            Log.info("media: cannot route to BlackHole (\(status))")
+            Log.info("media: cannot route mic to \(deviceUID) (\(status))")
             AudioQueueDispose(out, true)
             return false
         }
@@ -246,6 +255,18 @@ final class MediaSender: NSObject, SCStreamOutput {
 
 /// The few CoreAudio lookups the mic bridge needs.
 enum AudioDevices {
+    /// Receivers with drivers, matched against the receiver's name.
+    /// ponytail: names fixed at driver build time; add one per new receiver.
+    static let receiverNames = ["MacBook Air", "iPad"]
+
+    /// Driver prefix ("ODMacBookAir") for a receiver, if its devices are installed.
+    static func driver(for receiverName: String) -> String? {
+        guard let name = receiverNames.first(where: { receiverName.localizedCaseInsensitiveContains($0) })
+        else { return nil }
+        let driver = "OD" + name.replacingOccurrences(of: " ", with: "")
+        return device(uid: "\(driver)Out_UID") != nil ? driver : nil
+    }
+
     static func device(uid: String) -> AudioDeviceID? {
         var cfUID = uid as CFString
         var device = AudioDeviceID(0)
