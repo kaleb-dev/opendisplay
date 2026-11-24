@@ -115,7 +115,7 @@ targets:
         PRODUCT_NAME: $(PRODUCT_BUNDLE_IDENTIFIER)
         INFOPLIST_FILE: CameraExtension/Info.plist
         # macOS replaces an installed extension only when this goes up: bump on every extension change.
-        CURRENT_PROJECT_VERSION: "2"
+        CURRENT_PROJECT_VERSION: "3"
         CODE_SIGN_ENTITLEMENTS: CameraExtension/CameraExtension.entitlements
         ENABLE_APP_SANDBOX: YES
         ENABLE_HARDENED_RUNTIME: YES
@@ -219,7 +219,7 @@ targets:
     info:
       path: iOS/Info.plist
       properties:
-        CFBundleDisplayName: OpenDisplay
+        CFBundleDisplayName: $(BUNDLE_DISPLAY_NAME)
         CFBundleIconName: AppIcon
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
@@ -230,6 +230,8 @@ targets:
         UIRequiresFullScreen: true
         UIRequiresFullScreenIgnoredStartingWithVersion: "27"
         NSLocalNetworkUsageDescription: OpenDisplay advertises itself on the local network so your Mac can connect over WiFi.
+        NSMicrophoneUsageDescription: OpenDisplay sends this device's microphone to the connected Mac for calls.
+        NSCameraUsageDescription: OpenDisplay sends this device's camera to the connected Mac for calls.
         NSBonjourServices: ["_opensidecar._tcp"]
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -239,5 +241,10 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.kalebdev.opendisplay.ios
+        BUNDLE_DISPLAY_NAME: OpenDisplay
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        # Fork: tell the dev build apart from the App Store app on the device.
+        Debug:
+          BUNDLE_DISPLAY_NAME: OpenDisplay Dev

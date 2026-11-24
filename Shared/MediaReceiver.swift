@@ -119,6 +119,17 @@ final class MediaReceiver {
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         do {
+            #if os(iOS)
+            // iPad: voice chat while the mic is shared (echo cancellation,
+            // loudspeaker), plain playback otherwise.
+            let session = AVAudioSession.sharedInstance()
+            if micOn {
+                try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker])
+            } else {
+                try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            }
+            try session.setActive(true)
+            #endif
             if micOn {
                 // Voice processing fails to initialize (-10875) unless the
                 // output side exists first; measured on macOS 27.2.

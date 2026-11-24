@@ -6,10 +6,25 @@ import SystemExtensions
 /// it decoded MacBook frames through its sink stream, and reports whether an
 /// app (FaceTime) is watching, so the MacBook camera only runs when needed.
 final class VirtualCamera: NSObject, OSSystemExtensionRequestDelegate {
-    /// One per app: the sender runs a MacSender (and MediaSender) per device.
-    static let shared = VirtualCamera()
-    /// Posted with `object` = Bool in-use whenever the camera gains or loses its last viewer.
+    /// One per receiver slot (VirtualCameraIDs.receivers), shared by every
+    /// MacSender/MediaSender: the sender runs one of those per device.
+    static let all = VirtualCameraIDs.receivers.indices.map { VirtualCamera(slot: $0) }
+    /// Posted with `object` = the VirtualCamera whenever it gains or loses its last viewer.
     static let inUseChanged = Notification.Name("VirtualCameraInUseChanged")
+
+    let slot: Int
+    init(slot: Int) { self.slot = slot }
+
+    /// Install the extension once, then start every camera's watcher.
+    static func startAll() {
+        DispatchQueue.main.async {   // every MediaSender calls this; activate once
+            guard !activationRequested else { return }
+            activationRequested = true
+            all.first?.requestActivation()
+            all.forEach { $0.start() }
+        }
+    }
+    private static var activationRequested = false
 
     private let queue = DispatchQueue(label: "opendisplay.virtualcamera")
     private var device: CMIOObjectID = 0
@@ -24,14 +39,18 @@ final class VirtualCamera: NSObject, OSSystemExtensionRequestDelegate {
     private var extensionID: String { (Bundle.main.bundleIdentifier ?? "") + ".camera" }
 
     /// Install or update the extension (needs the app in /Applications and,
-    /// the first time, the user's approval in System Settings), then watch it.
-    func start() {
-        guard !started else { return }
-        started = true
+    /// the first time, the user's approval in System Settings).
+    private func requestActivation() {
         let request = OSSystemExtensionRequest.activationRequest(forExtensionWithIdentifier: extensionID,
                                                                  queue: .main)
         request.delegate = self
         OSSystemExtensionManager.shared.submitRequest(request)
+    }
+
+    /// Watch this camera: connect its sink and track whether it's in use.
+    private func start() {
+        guard !started else { return }
+        started = true
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in self?.tick() }
@@ -64,9 +83,9 @@ final class VirtualCamera: NSObject, OSSystemExtensionRequestDelegate {
         let watched = readInUse()
         if watched != inUse {
             inUse = watched
-            Log.info("virtual camera \(watched ? "in use" : "idle")")
+            Log.info("virtual camera \(VirtualCameraIDs.name(slot)) \(watched ? "in use" : "idle")")
             isInUse = watched
-            NotificationCenter.default.post(name: Self.inUseChanged, object: watched)
+            NotificationCenter.default.post(name: Self.inUseChanged, object: self)
         }
     }
 
@@ -74,7 +93,7 @@ final class VirtualCamera: NSObject, OSSystemExtensionRequestDelegate {
 
     private func connectSink() {
         guard let found = Self.objects(CMIOObjectID(kCMIOObjectSystemObject), kCMIOHardwarePropertyDevices)
-            .first(where: { Self.uid($0) == VirtualCameraIDs.device.uuidString }) else { return }
+            .first(where: { Self.uid($0) == VirtualCameraIDs.device(slot).uuidString }) else { return }
         // The sink is the stream the app writes into; the extension adds it second.
         let streams = Self.objects(found, kCMIODevicePropertyStreams)
         guard streams.count >= 2 else { return }
@@ -86,7 +105,7 @@ final class VirtualCamera: NSObject, OSSystemExtensionRequestDelegate {
         guard CMIODeviceStartStream(found, sink) == noErr else { sinkQueue = nil; return }
         device = found
         sinkStream = sink
-        Log.info("virtual camera connected")
+        Log.info("virtual camera \(VirtualCameraIDs.name(slot)) connected")
     }
 
     private func readInUse() -> Bool {

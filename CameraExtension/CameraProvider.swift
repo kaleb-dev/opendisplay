@@ -17,21 +17,22 @@ final class CameraDeviceSource: NSObject, CMIOExtensionDeviceSource {
     private var sourceClients = 0
     private let format: CMFormatDescription
 
-    init(localizedName: String) {
+    init(slot: Int) {
         var description: CMFormatDescription?
         CMVideoFormatDescriptionCreate(allocator: kCFAllocatorDefault, codecType: kCVPixelFormatType_32BGRA,
                                        width: VirtualCameraIDs.width, height: VirtualCameraIDs.height,
                                        extensions: nil, formatDescriptionOut: &description)
         format = description!
         super.init()
-        device = CMIOExtensionDevice(localizedName: localizedName, deviceID: VirtualCameraIDs.device,
-                                     legacyDeviceID: VirtualCameraIDs.device.uuidString, source: self)
+        device = CMIOExtensionDevice(localizedName: VirtualCameraIDs.name(slot),
+                                     deviceID: VirtualCameraIDs.device(slot),
+                                     legacyDeviceID: VirtualCameraIDs.device(slot).uuidString, source: self)
         let frame = CMTime(value: 1, timescale: VirtualCameraIDs.framesPerSecond)
         let streamFormat = CMIOExtensionStreamFormat(formatDescription: format, maxFrameDuration: frame,
                                                      minFrameDuration: frame, validFrameDurations: nil)
-        source = CameraStreamSource(localizedName: "MacBook Camera", streamID: VirtualCameraIDs.sourceStream,
+        source = CameraStreamSource(localizedName: VirtualCameraIDs.name(slot), streamID: VirtualCameraIDs.sourceStream(slot),
                                     direction: .source, format: streamFormat, owner: self)
-        sink = CameraStreamSource(localizedName: "MacBook Camera Sink", streamID: VirtualCameraIDs.sinkStream,
+        sink = CameraStreamSource(localizedName: VirtualCameraIDs.name(slot) + " Sink", streamID: VirtualCameraIDs.sinkStream(slot),
                                   direction: .sink, format: streamFormat, owner: self)
         do {
             try device.addStream(source.stream)
@@ -160,16 +161,19 @@ final class CameraStreamSource: NSObject, CMIOExtensionStreamSource {
 
 final class CameraProviderSource: NSObject, CMIOExtensionProviderSource {
     private(set) var provider: CMIOExtensionProvider!
-    private var deviceSource: CameraDeviceSource!
+    private var deviceSources: [CameraDeviceSource] = []
 
     init(clientQueue: DispatchQueue?) {
         super.init()
         provider = CMIOExtensionProvider(source: self, clientQueue: clientQueue)
-        deviceSource = CameraDeviceSource(localizedName: VirtualCameraIDs.name)
-        do {
-            try provider.addDevice(deviceSource.device)
-        } catch {
-            fatalError("Failed to add device: \(error.localizedDescription)")
+        for slot in VirtualCameraIDs.receivers.indices {
+            let source = CameraDeviceSource(slot: slot)
+            do {
+                try provider.addDevice(source.device)
+            } catch {
+                fatalError("Failed to add device: \(error.localizedDescription)")
+            }
+            deviceSources.append(source)
         }
     }
 

@@ -541,6 +541,9 @@ private struct DeviceNameField: View {
 @MainActor
 final class ReceiverModel: ObservableObject {
     let receiver: StreamReceiver
+    // Fork: sound, mic and front camera for the connected Mac (MediaLink.swift).
+    let media = MediaReceiver()
+    private lazy var camera = CameraCapture { [media] in media.sendCamera($0) }
     private let decodesHEVC: Bool
     private var started = false
     private var cancellables = Set<AnyCancellable>()
@@ -626,6 +629,8 @@ final class ReceiverModel: ObservableObject {
         guard !started else { return }
         started = true
         receiver.start(port: 9000)
+        media.onCameraRequest = { [camera] in camera.setRunning($0) }
+        media.start(displayPort: 9000)
     }
 
     // MARK: - Lock vs app switch vs app quit

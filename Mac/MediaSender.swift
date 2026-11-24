@@ -14,6 +14,9 @@ final class MediaSender: NSObject {
     private var conn: NWConnection?
     private var soundIn: AudioQueueRef?
     private var driver: String?
+    private var redial: (() -> Void)?
+    /// This receiver's virtual camera, by name like its audio devices.
+    private var camera: VirtualCamera?
     private var micOut: AudioQueueRef?
     private var micFifo: [Float] = []
     private var micPoll: DispatchSourceTimer?
@@ -30,7 +33,7 @@ final class MediaSender: NSObject {
             Log.info("camera: decoded frame \(self.cameraFrames) "
                 + "\(CVPixelBufferGetWidth(image))x\(CVPixelBufferGetHeight(image))")
         }
-        VirtualCamera.shared.push(image)
+        self.camera?.push(image)
     }
     private var cameraObserver: NSObjectProtocol?
 
@@ -38,24 +41,24 @@ final class MediaSender: NSObject {
         super.init()
         cameraObserver = NotificationCenter.default.addObserver(
             forName: VirtualCamera.inUseChanged, object: nil, queue: nil) { [weak self] note in
-            guard let inUse = note.object as? Bool else { return }
-            self?.queue.async { self?.send(.control, Data("{\"camera\":\(inUse)}".utf8)) }
+            guard let changed = note.object as? VirtualCamera else { return }
+            self?.queue.async {
+                guard let self, changed === self.camera else { return }
+                self.send(.control, Data("{\"camera\":\(changed.isInUse)}".utf8))
+            }
         }
-        VirtualCamera.shared.start()
+        VirtualCamera.startAll()
     }
 
     /// `receiverName` picks the receiver's audio devices (e.g. "Kaleb's MacBook Air").
     func connect(host: NWEndpoint.Host, displayPort: UInt16, receiverName: String) {
         queue.async { [self] in
-            disconnectOnQueue()
-            generation += 1
-            driver = AudioDevices.driver(for: receiverName)
-            let gen = generation
+            let gen = begin(receiverName)
+            redial = { [weak self] in self?.connect(host: host, displayPort: displayPort, receiverName: receiverName) }
             let port = NWEndpoint.Port(rawValue: displayPort &+ MediaLink.portOffset)!
             let params = NWParameters.tcp
             params.serviceClass = .interactiveVoice
             let conn = NWConnection(host: host, port: port, using: params)
-            self.conn = conn
             conn.stateUpdateHandler = { [weak self] state in
                 guard let self else { return }
                 switch state {
@@ -69,22 +72,72 @@ final class MediaSender: NSObject {
                 default: break
                 }
             }
-            MediaLink.receive(on: conn, onFrame: { [weak self] tag, data in
-                guard let self, self.generation == gen else { return }
-                switch tag {
-                case .mic: self.playMic(data)
-                case .camera: self.cameraDecoder.decode(data)
-                default: break
-                }
-            }, onEnd: { [weak self] in
-                self?.queue.async { if self?.generation == gen { self?.disconnectOnQueue() } }
-            })
+            adopt(conn, gen)
             conn.start(queue: queue)
         }
     }
 
+    /// iPad/iPhone on a cable: the same link, tunnelled through usbmuxd.
+    func connectUSB(udid: String?, displayPort: UInt16, receiverName: String) {
+        queue.async { [self] in
+            let gen = begin(receiverName)
+            redial = { [weak self] in self?.connectUSB(udid: udid, displayPort: displayPort, receiverName: receiverName) }
+            Task {
+                do {
+                    let conn = try await Usbmux.dial(udid: udid, port: displayPort &+ MediaLink.portOffset,
+                                                     queue: self.queue)
+                    self.queue.async {
+                        guard self.generation == gen else { conn.cancel(); return }
+                        Log.info("media link ready over USB")
+                        self.adopt(conn, gen)   // usbmux hands it over already connected
+                        self.startOnQueue(gen)
+                    }
+                } catch {
+                    Log.info("media link unavailable over USB (\(error)); sound/mic/camera off")
+                    self.queue.async { self.scheduleRedial(gen) }
+                }
+            }
+        }
+    }
+
+    private func begin(_ receiverName: String) -> Int {
+        disconnectOnQueue()
+        generation += 1
+        driver = AudioDevices.driver(for: receiverName)
+        camera = VirtualCameraIDs.slot(for: receiverName).map { VirtualCamera.all[$0] }
+        return generation
+    }
+
+    private func adopt(_ conn: NWConnection, _ gen: Int) {
+        self.conn = conn
+        MediaLink.receive(on: conn, onFrame: { [weak self] tag, data in
+            guard let self, self.generation == gen else { return }
+            switch tag {
+            case .mic: self.playMic(data)
+            case .camera: self.cameraDecoder.decode(data)
+            default: break
+            }
+        }, onEnd: { [weak self] in
+            self?.queue.async {
+                guard let self, self.generation == gen else { return }
+                self.disconnectOnQueue()
+                self.scheduleRedial(gen)
+            }
+        })
+    }
+
+    /// The display link is still up but the media link dropped: dial again.
+    /// ponytail: fixed 2 s retry, no backoff; a stock receiver refuses fast and cheaply.
+    private func scheduleRedial(_ gen: Int) {
+        queue.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.generation == gen, self.conn == nil else { return }
+            Log.info("media link dropped; redialing")
+            self.redial?()
+        }
+    }
+
     func disconnect() {
-        queue.async { [self] in generation += 1; disconnectOnQueue() }
+        queue.async { [self] in generation += 1; redial = nil; disconnectOnQueue() }
     }
 
     private func disconnectOnQueue() {
@@ -122,7 +175,7 @@ final class MediaSender: NSObject {
         // The MacBook camera runs while an app watches the virtual camera.
         // `defaults write <sender bundle id> cameraDebug -bool YES` forces it on
         // for testing without the extension.
-        if VirtualCamera.shared.isInUse || UserDefaults.standard.bool(forKey: "cameraDebug") {
+        if camera?.isInUse == true || UserDefaults.standard.bool(forKey: "cameraDebug") {
             send(.control, Data("{\"camera\":true}".utf8))
         }
     }
@@ -257,7 +310,7 @@ final class MediaSender: NSObject {
 enum AudioDevices {
     /// Receivers with drivers, matched against the receiver's name.
     /// ponytail: names fixed at driver build time; add one per new receiver.
-    static let receiverNames = ["MacBook Air", "iPad"]
+    static let receiverNames = VirtualCameraIDs.receivers
 
     /// Driver prefix ("ODMacBookAir") for a receiver, if its devices are installed.
     static func driver(for receiverName: String) -> String? {
